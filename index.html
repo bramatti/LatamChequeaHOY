@@ -433,21 +433,18 @@
 
 <script>
 // ── CONFIG ──────────────────────────────────────────────────────────────────
-// 1. Substitua pelo ID da sua planilha (parte da URL entre /d/ e /edit)
-// 2. A planilha deve ter 3 colunas: Nome do veículo | URL do RSS | URL do logotipo
-// 3. Publique como: Arquivo → Compartilhar → Publicar na web → toda a planilha → CSV
-const SHEET_ID = '1-0F4xw_WTAiB3vCHEtq4an4NEFlPRozOF8O5-Ym1tss';
-const SHEET_TAB = 'RSS'; // nome da aba (em português: Página1, em inglês: Sheet1)
+// Cole aqui o link gerado em: Arquivo → Compartilhar → Publicar na web
+// Escolha a aba correta e formato CSV, depois copie o link gerado.
+const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRDuFsXq8TRqxEyDQ3lVIbJJ3mrT7_jPxlgWWCzLJr4FHS_Nk84rgpTtI0ODWQv2gKCTY61aca9NCCh/pub?output=csv';
 
 // Proxy gratuito que resolve o problema de CORS dos feeds RSS
-// Não é necessário cadastro para uso básico
 const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url=';
 
 const REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutos
 const MAX_ITEMS_PER_FEED = 5;
 
 // ── STATE ────────────────────────────────────────────────────────────────────
-let allItems = [];
+csvlet allItems = [];
 let sources = [];
 let activeSource = 'all';
 let countdownTimer = null;
@@ -483,20 +480,32 @@ function updateHeaderDate() {
     new Date().toLocaleDateString('es-ES', opts);
 }
 
-// ── FETCH SOURCES FROM GOOGLE SHEETS ─────────────────────────────────────────
+// ── FETCH SOURCES FROM GOOGLE SHEETS (CSV publicado) ─────────────────────────
 async function fetchSources() {
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(SHEET_TAB)}`;
-  const res = await fetch(url);
+  const res = await fetch(SHEET_CSV_URL);
   const text = await res.text();
-  // Google wraps the JSON in a callback: google.visualization.Query.setResponse({...})
-  const json = JSON.parse(text.match(/google\.visualization\.Query\.setResponse\(([\s\S]*)\)/)[1]);
-  return json.table.rows
-    .map(row => ({
-      name: row.c[0]?.v?.toString().trim() || '',
-      rss:  row.c[1]?.v?.toString().trim() || '',
-      logo: row.c[2]?.v?.toString().trim() || ''
-    }))
-    .filter(s => s.name && s.rss);
+  return parseCSV(text)
+    .filter(r => r.length >= 2 && r[0].trim() && r[1].trim())
+    .map(r => ({
+      name: r[0].trim(),
+      rss:  r[1].trim(),
+      logo: r[2] ? r[2].trim() : ''
+    }));
+}
+
+function parseCSV(text) {
+  return text.split(/\r?\n/).map(line => {
+    const cols = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') { inQ = !inQ; continue; }
+      if (ch === ',' && !inQ) { cols.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    cols.push(cur);
+    return cols.map(c => c.trim());
+  }).filter(r => r.some(c => c));
 }
 
 // ── FETCH RSS via proxy rss2json (resolve CORS) ───────────────────────────────
