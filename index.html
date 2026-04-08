@@ -433,18 +433,31 @@
 
 <script>
 // ── CONFIG ──────────────────────────────────────────────────────────────────
-// Cole aqui o link gerado em: Arquivo → Compartilhar → Publicar na web
-// Escolha a aba correta e formato CSV, depois copie o link gerado.
-const SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRDuFsXq8TRqxEyDQ3lVIbJJ3mrT7_jPxlgWWCzLJr4FHS_Nk84rgpTtI0ODWQv2gKCTY61aca9NCCh/pub?output=csv';
+// Opção A (recomendado): cole o link CSV gerado em
+//   Arquivo → Compartilhar → Publicar na web → escolha a aba → CSV → Publicar
+// Quando SHEET_CSV_URL estiver preenchido, a planilha será usada como fonte.
+// Opção B: deixe SHEET_CSV_URL vazio ('') e edite STATIC_SOURCES abaixo.
+const SHEET_CSV_URL = '';
 
-// Proxy gratuito que resolve o problema de CORS dos feeds RSS
-const RSS2JSON = 'https://api.rss2json.com/v1/api.json?rss_url=';
+// Fontes estáticas — usadas quando SHEET_CSV_URL está vazio ou falha
+const STATIC_SOURCES = [
+  { name: 'Aos Fatos',             rss: 'https://www.aosfatos.org/noticias/feed/',                     logo: 'https://ajor.org.br/wp-content/uploads/2021/04/logo-aosfatos.png' },
+  { name: 'Agencia Ocote',         rss: 'https://www.agenciaocote.com/feed/',                          logo: '' },
+  { name: 'Colombia Check',        rss: 'https://rss.app/feeds/R2awvdak4COFTqE5.xml',                  logo: 'https://colombiacheck.s3.us-east-2.amazonaws.com/colcheck/theme/Logo_10.png' },
+  { name: 'Chequea Bolivia',       rss: 'https://rss.app/feeds/f09uG9ikO9IiIp1q.xml',                  logo: 'https://chequeabolivia.bo/sites/default/files/Logo_azulyverde_2024.png' },
+  { name: 'Chequeado',             rss: 'https://chequeado.com/feed/?post_type=nota',                  logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/f/fa/Logo-chequeado.svg/960px-Logo-chequeado.svg.png' },
+  { name: 'Cazadores de Fake News',rss: 'https://cazadores.info/feed/',                               logo: '' },
+  { name: 'Bolivia Verifica',      rss: 'https://boliviaverifica.bo/feed/',                            logo: 'https://boliviaverifica.bo/wp-content/uploads/2023/01/logo-web-2.webp' },
+];
 
-const REFRESH_INTERVAL_MS = 30 * 60 * 1000; // 30 minutos
+const RSS2JSON_URL = 'https://api.rss2json.com/v1/api.json?rss_url=';
+const ALLORIGINS_URL = 'https://api.allorigins.win/get?url=';
+
+const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
 const MAX_ITEMS_PER_FEED = 5;
 
 // ── STATE ────────────────────────────────────────────────────────────────────
-csvlet allItems = [];
+let allItems = [];
 let sources = [];
 let activeSource = 'all';
 let countdownTimer = null;
@@ -480,58 +493,89 @@ function updateHeaderDate() {
     new Date().toLocaleDateString('es-ES', opts);
 }
 
-// ── FETCH SOURCES FROM GOOGLE SHEETS (CSV publicado) ─────────────────────────
+// ── FETCH SOURCES ─────────────────────────────────────────────────────────────
 async function fetchSources() {
-  const res = await fetch(SHEET_CSV_URL);
-  const text = await res.text();
-  return parseCSV(text)
-    .filter(r => r.length >= 2 && r[0].trim() && r[1].trim())
-    .map(r => ({
-      name: r[0].trim(),
-      rss:  r[1].trim(),
-      logo: r[2] ? r[2].trim() : ''
-    }));
+  if (!SHEET_CSV_URL || SHEET_CSV_URL.includes('COLE_AQUI')) {
+    console.log('[LatamChequea] Usando fontes estáticas (SHEET_CSV_URL não configurado)');
+    return STATIC_SOURCES;
+  }
+  try {
+    const res = await fetch(SHEET_CSV_URL);
+    const text = await res.text();
+    const rows = parseCSV(text).filter(r => r.length >= 2 && r[0] && r[1]);
+    if (!rows.length) throw new Error('Planilha vazia ou formato inesperado');
+    console.log(`[LatamChequea] ${rows.length} fontes carregadas da planilha`);
+    return rows.map(r => ({ name: r[0], rss: r[1], logo: r[2] || '' }));
+  } catch (e) {
+    console.warn('[LatamChequea] Falha ao carregar planilha, usando fontes estáticas:', e.message);
+    return STATIC_SOURCES;
+  }
 }
 
 function parseCSV(text) {
   return text.split(/\r?\n/).map(line => {
-    const cols = [];
-    let cur = '', inQ = false;
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i];
+    const cols = []; let cur = '', inQ = false;
+    for (const ch of line) {
       if (ch === '"') { inQ = !inQ; continue; }
-      if (ch === ',' && !inQ) { cols.push(cur); cur = ''; continue; }
+      if (ch === ',' && !inQ) { cols.push(cur.trim()); cur = ''; continue; }
       cur += ch;
     }
-    cols.push(cur);
-    return cols.map(c => c.trim());
+    cols.push(cur.trim());
+    return cols;
   }).filter(r => r.some(c => c));
 }
 
-// ── FETCH RSS via proxy rss2json (resolve CORS) ───────────────────────────────
+// ── FETCH RSS ─────────────────────────────────────────────────────────────────
 async function fetchRSS(source) {
-  const proxyUrl = RSS2JSON + encodeURIComponent(source.rss) + `&count=${MAX_ITEMS_PER_FEED}`;
-  const res = await fetch(proxyUrl);
-  const data = await res.json();
+  // Tenta rss2json primeiro
+  try {
+    const url = RSS2JSON_URL + encodeURIComponent(source.rss) + `&count=${MAX_ITEMS_PER_FEED}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.status === 'ok' && data.items?.length) {
+      console.log(`[${source.name}] OK via rss2json (${data.items.length} itens)`);
+      return data.items.map(item => parseRss2jsonItem(item, source));
+    }
+    console.warn(`[${source.name}] rss2json retornou status: ${data.status}`);
+  } catch (e) {
+    console.warn(`[${source.name}] rss2json falhou:`, e.message);
+  }
 
-  if (data.status !== 'ok') return [];
+  // Fallback: allorigins + parse XML manual
+  try {
+    const url = ALLORIGINS_URL + encodeURIComponent(source.rss);
+    const res = await fetch(url);
+    const data = await res.json();
+    const xml = new DOMParser().parseFromString(data.contents, 'text/xml');
+    const items = [...xml.querySelectorAll('item')].slice(0, MAX_ITEMS_PER_FEED);
+    if (!items.length) throw new Error('Sem itens no XML');
+    console.log(`[${source.name}] OK via allorigins (${items.length} itens)`);
+    return items.map(item => parseXMLItem(item, source));
+  } catch (e) {
+    console.error(`[${source.name}] Ambos proxies falharam:`, e.message);
+    return [];
+  }
+}
 
-  return data.items.map(item => {
-    let desc = item.description || item.content || '';
-    desc = desc.replace(/<[^>]*>/g, '').replace(/&[a-z#0-9]+;/gi, ' ').replace(/\s+/g, ' ').trim();
-    if (desc.length > 180) desc = desc.slice(0, 180).replace(/\s+\S*$/, '') + '…';
+function parseRss2jsonItem(item, source) {
+  let desc = item.description || item.content || '';
+  desc = stripHtml(desc);
+  if (desc.length > 200) desc = desc.slice(0, 200).replace(/\s+\S*$/, '') + '…';
+  const pubDate = item.pubDate ? new Date(item.pubDate) : new Date(0);
+  return { title: item.title?.trim() || '', link: item.link?.trim() || '', desc, date: pubDate, dateStr: formatDate(pubDate), source: source.name, logo: source.logo };
+}
 
-    const pubDate = item.pubDate ? new Date(item.pubDate) : new Date(0);
-    return {
-      title:   item.title?.trim() || '',
-      link:    item.link?.trim()  || '',
-      desc,
-      date:    pubDate,
-      dateStr: formatDate(pubDate),
-      source:  source.name,
-      logo:    source.logo
-    };
-  });
+function parseXMLItem(item, source) {
+  const get = tag => item.querySelector(tag)?.textContent?.trim() || '';
+  let desc = get('description');
+  desc = stripHtml(desc);
+  if (desc.length > 200) desc = desc.slice(0, 200).replace(/\s+\S*$/, '') + '…';
+  const pubDate = get('pubDate') ? new Date(get('pubDate')) : new Date(0);
+  return { title: get('title'), link: get('link'), desc, date: pubDate, dateStr: formatDate(pubDate), source: source.name, logo: source.logo };
+}
+
+function stripHtml(s) {
+  return s.replace(/<[^>]*>/g, '').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/\s+/g,' ').trim();
 }
 
 function formatDate(d) {
@@ -550,28 +594,33 @@ async function refreshAll() {
   document.getElementById('last-update').textContent = 'Actualizando…';
   showLoading();
 
-  try {
-    sources = await fetchSources();
-    buildFilterBar(sources);
+  sources = await fetchSources();
+  buildFilterBar(sources);
 
-    const results = await Promise.allSettled(sources.map(fetchRSS));
-    allItems = [];
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') allItems.push(...r.value);
-    });
+  allItems = [];
+  let loaded = 0;
 
-    // Sort by date desc
-    allItems.sort((a, b) => b.date - a.date);
+  const results = await Promise.allSettled(sources.map(s => fetchRSS(s)));
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled' && r.value.length) {
+      allItems.push(...r.value);
+      loaded++;
+    }
+  });
 
+  allItems.sort((a, b) => b.date - a.date);
+
+  if (allItems.length) {
     renderItems(allItems);
     const now = new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
-    document.getElementById('last-update').textContent = `Última actualización: ${now}`;
-    startCountdown();
-  } catch (e) {
-    showError(e.message);
-    document.getElementById('last-update').textContent = 'Error al actualizar.';
+    document.getElementById('last-update').textContent =
+      `Actualizado: ${now} · ${loaded} de ${sources.length} fuentes · ${allItems.length} artículos`;
+  } else {
+    showError('No se pudo cargar ningún feed. Revisa la consola del navegador (F12) para ver detalles.');
+    document.getElementById('last-update').textContent = 'Sin datos.';
   }
 
+  startCountdown();
   btn.disabled = false;
 }
 
